@@ -1,0 +1,36 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Global Safety Net
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // Helpers
+    function isValidId(id) { return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$'); }
+    function incoming() { return request.resource.data; }
+    
+    function isValidScore(data) {
+      return data.keys().hasAll(['name', 'score', 'mode', 'target', 'date', 'createdAt'])
+        && data.keys().size() == 6
+        && data.name is string && data.name.size() >= 1 && data.name.size() <= 20
+        && data.score is number && data.score >= 0
+        && data.mode in ['multiples', 'divisors']
+        && data.target is number
+        && data.date is string && data.date.size() <= 100
+        && data.createdAt == request.time;
+    }
+
+    match /leaderboard/{scoreId} {
+      // Identity: Public reads for the leaderboard
+      // Secure list query: Ensure we don't leak anything unexpected if we add fields later
+      allow list: if true;
+      allow get: if true;
+      
+      // Integrity: Anyone can create a score record if it matches the schema.
+      // No updates or deletes allowed to prevent tampering once submitted.
+      allow create: if isValidId(scoreId) && isValidScore(incoming());
+      allow update, delete: if false;
+    }
+  }
+}

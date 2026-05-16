@@ -1,0 +1,44 @@
+{
+  "entities": {
+    "ScoreRecord": {
+      "title": "Score Record",
+      "description": "A high score entry in the leaderboard.",
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "The name of the player."
+        },
+        "score": {
+          "type": "number",
+          "description": "The score achieved."
+        },
+        "mode": {
+          "type": "string",
+          "description": "The game mode (multiples or divisors)."
+        },
+        "target": {
+          "type": "number",
+          "description": "The target number for the session."
+        },
+        "date": {
+          "type": "string",
+          "format": "date-time",
+          "description": "The date and time the score was achieved."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp of creation."
+        }
+      },
+      "required": ["name", "score", "mode", "target", "date", "createdAt"]
+    }
+  },
+  "firestore": {
+    "/leaderboard/{scoreId}": {
+      "schema": "ScoreRecord",
+      "description": "Global leaderboard collection."
+    }
+  }
+}
