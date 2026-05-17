@@ -2,11 +2,12 @@
 import React, { useState, useEffect, useRef, useCallback, useLayoutEffect } from 'react';
 import { createRoot } from 'react-dom/client';
 import { Target, Zap, Play, RotateCcw, Home, HelpCircle, Trophy, AlertTriangle, BookOpen, ChevronRight, ChevronLeft, X, ListOrdered, Save, User, Pause, PlayCircle, ArrowRight, CheckCircle2, AlertCircle, Sparkles, MousePointer2, Flame, Skull, Snowflake, RefreshCw, Loader2 } from 'lucide-react';
+import { motion, AnimatePresence } from 'motion/react';
 import { ScoreService, ScoreRecord } from './src/services/scoreService';
 
 // --- Constants & Types ---
 
-type GameMode = 'multiples' | 'divisors';
+type GameMode = 'multiples' | 'divisors' | 'adventure';
 type GameState = 'menu' | 'playing' | 'gameover' | 'victory' | 'tutorial' | 'leaderboard' | 'flowchart';
 
 interface Point {
@@ -52,7 +53,8 @@ const BALL_RADIUS = 20;
 const BALL_DIAMETER = BALL_RADIUS * 2;
 const PROJECTILE_SPEED = 22; 
 const PATH_SAMPLES = 1500; 
-const INITIAL_SPEED = 0.0003; 
+const INITIAL_SPEED = 0.00022; 
+const SPEED_INCREMENT = 0.00003;
 const CATCHUP_SPEED_MULTIPLIER = 4; 
 const MAX_SPEED = 0.0012; 
 const ENERGY_GAIN = 15; 
@@ -110,13 +112,18 @@ const ZumaMathGame = () => {
   const [energy, setEnergy] = useState<number>(100); 
   const [level, setLevel] = useState<number>(1);
   const [leaderboard, setLeaderboard] = useState<ScoreRecord[]>([]);
+  const [leaderboardFilter, setLeaderboardFilter] = useState<'all' | 'adventure'>('all');
   const [loadingScores, setLoadingScores] = useState<boolean>(false);
   const [playerName, setPlayerName] = useState<string>('');
   const [scoreSaved, setScoreSaved] = useState<boolean>(false);
+  const [isAdventure, setIsAdventure] = useState<boolean>(false);
+  const [activeTip, setActiveTip] = useState<string | null>(null);
+  const [comboMessage, setComboMessage] = useState<string | null>(null);
   const [dimensions, setDimensions] = useState({ width: window.innerWidth, height: window.innerHeight });
   const [tutorialStep, setTutorialStep] = useState<number>(0);
   const [comboDisplay, setComboDisplay] = useState<number>(0);
   const [isFrozen, setIsFrozen] = useState<boolean>(false); // UI State for freeze
+  const [firebaseStatus, setFirebaseStatus] = useState<'testing' | 'connected' | 'disconnected'>('testing');
   
   // Zuma Mechanics
   const [progress, setProgress] = useState<number>(0);
@@ -148,6 +155,23 @@ const ZumaMathGame = () => {
   const screenShakeRef = useRef<number>(0);
   const comboRef = useRef<number>(0);
   const comboTimerRef = useRef<any>(null);
+
+  const resetCombo = () => {
+    if (comboTimerRef.current) clearTimeout(comboTimerRef.current);
+    comboRef.current = 0;
+    setComboDisplay(0);
+  };
+
+  const updateCombo = (points: number) => {
+    const newCombo = comboRef.current;
+    if (newCombo > 0 && newCombo % 5 === 0) {
+      const msgs = ["¡Increíble!", "¡Genio!", "¡Imparable!", "¡Dominando!", "¡Matemático!", "¡Perfecto!"];
+      setComboMessage(msgs[Math.min(msgs.length - 1, Math.floor(newCombo / 5) - 1)]);
+      setTimeout(() => setComboMessage(null), 1500);
+    }
+    const multiplier = 1 + Math.floor(newCombo / 5) * 0.1;
+    setScore(s => s + Math.round(points * multiplier));
+  };
   
   useLayoutEffect(() => {
     if (!containerRef.current) return;
@@ -219,24 +243,38 @@ const ZumaMathGame = () => {
     }
   };
 
-  const initLevel = (lvl: number, mode: GameMode, chosenTarget?: number) => {
+  const initLevel = (lvl: number, mode: GameMode, chosenTarget?: number, resetScore = true) => {
     let target = chosenTarget || targetNumber;
     if (!chosenTarget) {
-      if (mode === 'multiples') target = getRandomInt(2, 9);
-      else target = [12, 16, 20, 24, 30, 36, 48, 60][getRandomInt(0, 7)];
+      if (mode === 'multiples') {
+        // More controlled growth for multiples
+        target = getRandomInt(2, Math.min(12, 3 + lvl));
+      } else {
+        // Easier numbers for divisors at early levels
+        const easyDivisors = [6, 8, 10, 12, 14, 15, 16, 18, 20, 24];
+        const midDivisors = [30, 36, 40, 42, 45, 48, 50, 54, 60];
+        const hardDivisors = [72, 80, 84, 90, 100, 120];
+        
+        let pool = easyDivisors;
+        if (lvl > 8) pool = hardDivisors;
+        else if (lvl > 4) pool = midDivisors;
+        
+        target = pool[getRandomInt(0, pool.length - 1)];
+      }
     }
     setTargetNumber(target);
-    setScore(0);
+    if (resetScore) setScore(0);
     setEnergy(100);
     setLevel(lvl);
     setScoreSaved(false);
     setIsPaused(false);
     
-    const ballsNeeded = 10 + (lvl * 5); 
+    // Lower quota for early levels
+    const ballsNeeded = Math.min(40, 8 + lvl * 4); 
     setQuota(ballsNeeded);
     setProgress(0);
     
-    gameSpeedRef.current = INITIAL_SPEED + (lvl - 1) * 0.00003;
+    gameSpeedRef.current = Math.min(MAX_SPEED, INITIAL_SPEED + (lvl - 1) * SPEED_INCREMENT);
     speedPenaltyMultiplierRef.current = 1;
     freezeEndTimeRef.current = 0;
     lastBonusSpawnTimeRef.current = 0; 
@@ -315,12 +353,20 @@ const ZumaMathGame = () => {
         setComboDisplay(0);
       }, 4000);
 
-      const comboMultiplier = comboRef.current;
-      let points = 100 * comboMultiplier;
+      const comboCount = comboRef.current;
+      const basePoints = 100 + comboCount * 20;
+      updateCombo(basePoints);
+
+      // Threshold Bonuses
+      if (comboCount >= 10) {
+        if(p) spawnText(p.x, p.y - 110, "LEGENDARY COMBO!", "#f59e0b", 36, 'combo');
+      } else if (comboCount >= 5) {
+        if(p) spawnText(p.x, p.y - 110, "SUPER COMBO!", "#fbbf24", 32, 'combo');
+      }
 
       // Bonus Ball Logic
       if (hitBall.isBonus) {
-        points += 500;
+        setScore(s => s + 500); // Direct extra score for bonus
         freezeEndTimeRef.current = Date.now() + 5000; // Freeze for 5 seconds
         if(p) {
             spawnText(p.x, p.y - 60, "¡CONGELADO!", "#38bdf8", 28, 'text');
@@ -328,24 +374,46 @@ const ZumaMathGame = () => {
         }
       }
 
-      setScore(s => s + points);
-      setEnergy(e => Math.min(100, e + ENERGY_GAIN));
+      const energyGain = Math.max(10, 20 - level);
+      setEnergy(e => Math.min(100, e + energyGain));
       setProgress(prog => Math.min(quota, prog + 1)); 
       
       const b = ballsRef.current[ballIndex];
       if (b && p) spawnParticles(p.x, p.y, b.isBonus ? BONUS_COLOR : '#f59e0b', 15);
 
-      const comboText = comboMultiplier > 1 ? `COMBO x${comboMultiplier}!` : `+${points}`;
-      if (p && !hitBall.isBonus) spawnText(p.x, p.y - 30, comboText, comboMultiplier > 1 ? '#f59e0b' : '#fff', comboMultiplier > 1 ? 32 : 24, comboMultiplier > 1 ? 'combo' : 'text');
+      const comboText = comboCount > 1 ? `COMBO x${comboCount}!` : `+${basePoints}`;
+      if (p && !hitBall.isBonus) {
+        let comboColor = '#fff';
+        if (comboCount >= 10) comboColor = '#d946ef'; // Legendary
+        else if (comboCount >= 5) comboColor = '#f59e0b'; // Super
+        else if (comboCount > 1) comboColor = '#fbbf24'; // Regular combo
+        
+        spawnText(p.x, p.y - 30, comboText, comboColor, comboCount > 1 ? 32 : 24, comboCount > 1 ? 'combo' : 'text');
+        if (comboCount > 1) spawnParticles(p.x, p.y, comboColor, 20);
+      }
       
-      screenShakeRef.current = 2;
+      screenShakeRef.current = comboCount > 1 ? 3 + Math.min(5, comboCount) : 2;
       
     } else {
-      // --- BAD HIT ---
-      comboRef.current = 0;
-      setComboDisplay(0);
+      // --- BAD HIT (Wrong condition or wrong button) ---
+      resetCombo();
       
-      setEnergy(e => Math.max(0, e - ENERGY_LOSS)); 
+      // Calculate a helpful tip
+      if (hitBall && activeTip === null) {
+        if (gameMode === 'multiples') {
+            const nearestLess = Math.floor(hitBall.value / targetNumber) * targetNumber;
+            const nearestMore = Math.ceil(hitBall.value / targetNumber) * targetNumber;
+            const choice = Math.abs(hitBall.value - nearestLess) < Math.abs(hitBall.value - nearestMore) ? nearestLess : nearestMore;
+            setActiveTip(`¡Cerca! ${targetNumber} x ${Math.round(choice/targetNumber)} es ${choice}`);
+            setTimeout(() => setActiveTip(null), 3000);
+        } else {
+            setActiveTip(`El ${hitBall.value} no es divisible por ${targetNumber}`);
+            setTimeout(() => setActiveTip(null), 3000);
+        }
+      }
+
+      const energyLoss = Math.min(ENERGY_LOSS, 15 + (level - 1) * 2);
+      setEnergy(e => Math.max(0, e - energyLoss)); 
       setScore(s => Math.max(0, s - 50));
       
       if(p) {
@@ -459,7 +527,12 @@ const ZumaMathGame = () => {
       
       let collided = false;
       if (p.x < 0 || p.x > dimensions.width || p.y < 0 || p.y > dimensions.height) {
-        collided = true; 
+        collided = true;
+        // Missed shot: Reset combo
+        if (comboRef.current > 0) {
+          resetCombo();
+          spawnText(p.x, p.y, "¡FALLO!", "#94a3b8", 16, 'text');
+        }
       } else {
         for (let i = 0; i < ballsRef.current.length; i++) {
           const b = ballsRef.current[i];
@@ -650,13 +723,21 @@ const ZumaMathGame = () => {
     ctx.restore();
   }, [gameState, targetNumber, gameMode, isPaused, energy, dimensions, progress, quota, isFrozen]);
 
-  const startGame = (mode: GameMode) => {
-    setGameMode(mode);
-    let target = undefined;
-    if (customTarget && !isNaN(parseInt(customTarget))) {
-        target = parseInt(customTarget);
+  const startGame = (mode: GameMode | 'adventure') => {
+    setScore(0);
+    if (mode === 'adventure') {
+      setIsAdventure(true);
+      setGameMode('multiples');
+      initLevel(1, 'multiples', 2, true);
+    } else {
+      setIsAdventure(false);
+      setGameMode(mode);
+      let target = undefined;
+      if (customTarget && !isNaN(parseInt(customTarget))) {
+          target = parseInt(customTarget);
+      }
+      initLevel(1, mode, target, true);
     }
-    initLevel(1, mode, target);
     setGameState('flowchart');
   };
 
@@ -667,21 +748,39 @@ const ZumaMathGame = () => {
     const newRecord: Omit<ScoreRecord, 'createdAt'> = {
       name: playerName.trim().toUpperCase(),
       score: score,
-      mode: gameMode,
-      target: targetNumber,
+      mode: isAdventure ? 'adventure' : gameMode,
+      target: isAdventure ? level : targetNumber,
       date: new Date().toLocaleDateString()
     };
     
     await ScoreService.saveScore(newRecord);
     setScoreSaved(true);
+    if (isAdventure) setLeaderboardFilter('adventure');
     await refreshLeaderboard();
     setLoadingScores(false);
   };
 
+  useEffect(() => {
+    const checkFirebase = async () => {
+      const db = await ScoreService.getDb();
+      setFirebaseStatus(db ? 'connected' : 'disconnected');
+    };
+    checkFirebase();
+  }, []);
+
+  useEffect(() => {
+    const checkFirebase = async () => {
+      const db = await ScoreService.getDb();
+      setFirebaseStatus(db ? 'connected' : 'disconnected');
+    };
+    checkFirebase();
+  }, []);
+
   const refreshLeaderboard = async () => {
     setLoadingScores(true);
     try {
-      const topScores = await ScoreService.getTopScores(10);
+      const mode = leaderboardFilter === 'adventure' ? 'adventure' : undefined;
+      const topScores = await ScoreService.getTopScores(10, mode);
       setLeaderboard(topScores);
     } finally {
       setLoadingScores(false);
@@ -690,7 +789,7 @@ const ZumaMathGame = () => {
 
   useEffect(() => {
     refreshLeaderboard();
-  }, []);
+  }, [leaderboardFilter]);
 
   const tutorialSteps = [
     { title: "Misión Matemática", desc: `Usa CLICK IZQUIERDO para disparar a los ${gameMode === 'multiples' ? 'MÚLTIPLOS' : 'DIVISORES'} de ${targetNumber}.`, icon: <MousePointer2 className="w-12 h-12 text-blue-400" /> },
@@ -705,41 +804,111 @@ const ZumaMathGame = () => {
       {gameState === 'playing' && (
         <div className="absolute inset-0 p-6 pointer-events-none z-10 flex flex-col justify-between">
           <div className="flex justify-between items-start">
-            <div className="flex flex-col gap-2">
-              <div key={`${level}-${targetNumber}`} className="bg-slate-900/95 backdrop-blur-xl p-5 rounded-3xl border-2 border-blue-500/50 shadow-2xl pointer-events-auto animate-pulse-glow transition-all">
+            <div className="flex items-start gap-4">
+              <button 
+                onClick={() => {
+                  if(confirm('¿Volver al menú principal?')) {
+                    setGameState('menu');
+                    setIsPaused(false);
+                  }
+                }}
+                className="pointer-events-auto bg-slate-900/95 backdrop-blur-xl p-4 rounded-[1.5rem] border border-white/10 shadow-2xl hover:bg-slate-800 transition-all active:scale-95 group"
+                title="Volver al Menú"
+              >
+                <Home className="w-6 h-6 text-slate-400 group-hover:text-white transition-colors" />
+              </button>
+              
+              <div className="flex flex-col gap-2 text-left">
+                <div key={`${level}-${targetNumber}`} className="bg-slate-900/95 backdrop-blur-xl p-5 rounded-3xl border-2 border-blue-500/50 shadow-2xl pointer-events-auto animate-pulse-glow transition-all">
+                {isAdventure && (
+                  <div className="flex items-center gap-1 bg-amber-500 text-slate-950 px-2 py-0.5 rounded-full text-[8px] font-black uppercase tracking-widest mb-2 w-fit">
+                     <Flame className="w-2 h-2 fill-current" /> Modo Aventura
+                  </div>
+                )}
                 <div className="flex items-center gap-2 mb-1"><Target className="w-5 h-5 text-blue-400"/><span className="text-slate-400 text-xs font-black uppercase tracking-widest">Nivel {level}</span></div>
-                <h2 className="text-2xl font-black uppercase tracking-tight text-white">{gameMode} <span className="text-xs align-top text-slate-500 font-bold">DE</span> <span className="text-blue-400 text-4xl inline-block transform">{targetNumber}</span></h2>
+                <h2 className="text-2xl font-black uppercase tracking-tight text-white">{gameMode === 'multiples' ? 'MÚLTIPLOS' : 'DIVISORES'} <span className="text-xs align-top text-slate-500 font-bold">DE</span> <span className="text-blue-400 text-4xl inline-block transform">{targetNumber}</span></h2>
+                </div>
+                {isFrozen && (
+                  <div className="bg-cyan-500/20 backdrop-blur-md p-3 rounded-2xl border border-cyan-500/50 shadow-lg pointer-events-auto animate-pulse flex items-center gap-3">
+                    <Snowflake className="w-6 h-6 text-cyan-300 animate-spin-slow" />
+                    <div>
+                      <div className="text-cyan-300 text-[10px] font-black uppercase tracking-widest">TIEMPO</div>
+                      <div className="text-xl font-black text-white leading-none">CONGELADO</div>
+                    </div>
+                  </div>
+                )}
+                {comboDisplay > 1 && (
+                  <div className="bg-amber-500/10 backdrop-blur-md p-3 rounded-2xl border border-amber-500/50 shadow-lg pointer-events-auto animate-bounce-slow flex items-center gap-3">
+                    <Flame className="w-6 h-6 text-amber-500 animate-pulse" />
+                    <div>
+                      <div className="text-amber-500 text-[10px] font-black uppercase tracking-widest">RACHA</div>
+                      <div className="text-2xl font-black text-amber-400 leading-none">x{comboDisplay}</div>
+                    </div>
+                  </div>
+                )}
               </div>
-              {isFrozen && (
-                 <div className="bg-cyan-500/20 backdrop-blur-md p-3 rounded-2xl border border-cyan-500/50 shadow-lg pointer-events-auto animate-pulse flex items-center gap-3">
-                   <Snowflake className="w-6 h-6 text-cyan-300 animate-spin-slow" />
-                   <div>
-                     <div className="text-cyan-300 text-[10px] font-black uppercase tracking-widest">TIEMPO</div>
-                     <div className="text-xl font-black text-white leading-none">CONGELADO</div>
-                   </div>
-                </div>
-              )}
-              {comboDisplay > 1 && (
-                <div className="bg-amber-500/10 backdrop-blur-md p-3 rounded-2xl border border-amber-500/50 shadow-lg pointer-events-auto animate-bounce-slow flex items-center gap-3">
-                   <Flame className="w-6 h-6 text-amber-500 animate-pulse" />
-                   <div>
-                     <div className="text-amber-500 text-[10px] font-black uppercase tracking-widest">RACHA</div>
-                     <div className="text-2xl font-black text-amber-400 leading-none">x{comboDisplay}</div>
-                   </div>
-                </div>
-              )}
             </div>
-            <div className={`bg-slate-900/95 backdrop-blur-xl p-4 rounded-3xl border transition-all duration-300 shadow-2xl min-w-[140px] pointer-events-auto ${energy < 30 ? 'border-rose-500/50 shadow-rose-500/20' : 'border-white/10'}`}>
+            <div className={`bg-slate-900/95 backdrop-blur-xl p-4 rounded-3xl border transition-all duration-300 shadow-2xl min-w-[140px] pointer-events-auto ${energy < 30 ? 'border-rose-500/50 shadow-rose-500/20 ring-1 ring-rose-500/10' : 'border-white/10'}`}>
               <div className="flex justify-between items-end mb-1">
                  <div className={`text-[10px] font-black uppercase transition-colors ${energy < 30 ? 'text-rose-400 animate-pulse' : 'text-slate-500'}`}>{energy < 30 ? '¡CRÍTICO!' : 'ENERGÍA'}</div>
                  <div className="text-slate-500 text-[10px] font-black uppercase text-right">Puntos</div>
               </div>
               <div className="text-3xl font-black text-right tabular-nums mb-2 text-white">{score.toLocaleString()}</div>
-              <div className={`w-full bg-slate-950 h-3 rounded-full overflow-hidden border border-white/5 relative ${energy < 30 ? 'animate-shake-bar ring-2 ring-rose-500/30' : ''}`}>
-                  <div className={`h-full transition-all duration-300 relative ${energy < 30 ? 'animate-flash-danger' : 'bg-gradient-to-r from-blue-600 to-cyan-400'}`} style={{ width: `${Math.max(5, energy)}%` }}>
+              
+              <div className={`relative w-full bg-slate-950 h-3 rounded-full border border-white/5 overflow-visible ${energy < 30 ? 'animate-shake-bar' : ''}`}>
+                  <motion.div 
+                    className={`h-full rounded-full relative ${energy < 30 ? 'animate-flash-danger shadow-[0_0_15px_rgba(225,29,72,0.5)]' : 'bg-gradient-to-r from-blue-600 to-cyan-400'}`}
+                    initial={false}
+                    animate={{ width: `${Math.max(5, energy)}%` }}
+                    transition={{ type: "spring", stiffness: 300, damping: 30 }}
+                  >
                       <div className="absolute top-0 right-0 w-full h-full bg-gradient-to-b from-white/20 to-transparent" />
-                  </div>
+                      {energy < 30 && (
+                        <motion.div 
+                          className="absolute inset-0 bg-white/20 rounded-full"
+                          animate={{ opacity: [0, 0.4, 0] }}
+                          transition={{ repeat: Infinity, duration: 0.5 }}
+                        />
+                      )}
+                  </motion.div>
+                  {/* Warning Icon for Low Energy */}
+                  <AnimatePresence>
+                    {energy < 30 && (
+                      <motion.div 
+                        initial={{ opacity: 0, scale: 0 }}
+                        animate={{ opacity: 1, scale: 1 }}
+                        exit={{ opacity: 0, scale: 0 }}
+                        className="absolute -right-1 -top-1"
+                      >
+                        <AlertCircle className="w-4 h-4 text-rose-500 fill-slate-950 animate-pulse" />
+                      </motion.div>
+                    )}
+                  </AnimatePresence>
               </div>
+
+              {/* Educational Tips & Combo Messages */}
+              <AnimatePresence>
+                {activeTip && (
+                  <motion.div 
+                    initial={{ opacity: 0, y: 10 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    exit={{ opacity: 0, y: -10 }}
+                    className="absolute -bottom-12 left-0 right-0 bg-slate-800 text-blue-300 py-2 px-4 rounded-xl text-[10px] font-bold border border-blue-500/30 text-center shadow-xl"
+                  >
+                    {activeTip}
+                  </motion.div>
+                )}
+                {comboMessage && (
+                  <motion.div 
+                    initial={{ opacity: 0, scale: 0.5, y: -20 }}
+                    animate={{ opacity: 1, scale: 1.2, y: -40 }}
+                    exit={{ opacity: 0, scale: 1.5, y: -60 }}
+                    className="absolute -top-12 left-0 right-0 text-amber-400 font-black text-xl uppercase tracking-tighter text-center italic drop-shadow-[0_2px_10px_rgba(245,158,11,0.5)]"
+                  >
+                    {comboMessage}
+                  </motion.div>
+                )}
+              </AnimatePresence>
             </div>
           </div>
           <div className="flex justify-center items-center pointer-events-auto">
@@ -774,27 +943,69 @@ const ZumaMathGame = () => {
         <canvas ref={canvasRef} width={dimensions.width} height={dimensions.height} onMouseMove={onMove} onTouchMove={onMove} onMouseDown={onShoot} onTouchStart={onShoot} className={`block w-full h-full transition-all duration-700 ${gameState !== 'playing' ? 'opacity-20 blur-xl scale-95 pointer-events-none' : 'opacity-100 scale-100'}`} />
 
         {gameState === 'menu' && (
-          <div className="absolute inset-0 flex flex-col items-center justify-center bg-slate-950/40 backdrop-blur-md p-6 text-center z-50 animate-in fade-in duration-500">
+          <div className="absolute inset-0 flex flex-col items-center justify-start md:justify-center bg-slate-950/40 backdrop-blur-md px-6 py-12 overflow-y-auto text-center z-50 animate-in fade-in duration-500 scrollbar-hide">
             <div className="mb-6 p-6 bg-blue-600 rounded-[2rem] shadow-2xl animate-bounce-slow"><Zap className="w-16 h-16 text-white fill-current" /></div>
             <h1 className="text-6xl font-black mb-4 tracking-tighter uppercase text-white">Math Zuma</h1>
             <div className="w-full max-w-xs mb-8">
               <label className="text-slate-500 text-[10px] font-black uppercase block mb-3 tracking-widest">Número Base (Opcional)</label>
               <input type="number" placeholder="Aleatorio" value={customTarget} onChange={e => setCustomTarget(e.target.value)} className="w-full bg-slate-900 border border-white/10 rounded-2xl py-5 text-center font-black text-2xl focus:ring-2 focus:ring-blue-500/50 outline-none transition-all" />
             </div>
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-6 w-full max-w-xl mb-10">
-              <button onClick={() => startGame('multiples')} className="group p-10 bg-slate-900 border border-white/5 rounded-[2.5rem] hover:border-blue-500 transition-all active:scale-95 shadow-xl"><Play className="w-10 h-10 text-blue-400 mb-2 mx-auto group-hover:scale-110 transition-transform" /><span className="font-black text-xl uppercase">Múltiplos</span></button>
-              <button onClick={() => startGame('divisors')} className="group p-10 bg-slate-900 border border-white/5 rounded-[2.5rem] hover:border-cyan-500 transition-all active:scale-95 shadow-xl"><Target className="w-10 h-10 text-cyan-400 mb-2 mx-auto group-hover:scale-110 transition-transform" /><span className="font-black text-xl uppercase">Divisores</span></button>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-6 w-full max-w-xl mb-4">
+              <button 
+                onClick={() => startGame('multiples')} 
+                className="group p-8 bg-slate-900 border border-white/5 rounded-[2rem] hover:border-blue-500 transition-all active:scale-95 shadow-xl"
+              >
+                <Play className="w-8 h-8 text-blue-400 mb-2 mx-auto group-hover:scale-110 transition-transform" />
+                <span className="font-black text-lg uppercase">Múltiplos</span>
+              </button>
+              <button 
+                onClick={() => startGame('divisors')} 
+                className="group p-8 bg-slate-900 border border-white/5 rounded-[2rem] hover:border-cyan-500 transition-all active:scale-95 shadow-xl"
+              >
+                <Target className="w-8 h-8 text-cyan-400 mb-2 mx-auto group-hover:scale-110 transition-transform" />
+                <span className="font-black text-lg uppercase">Divisores</span>
+              </button>
             </div>
+            
+            <button 
+              onClick={() => startGame('adventure')} 
+              className="w-full max-w-xl group p-8 bg-gradient-to-r from-blue-600 to-cyan-500 rounded-[2rem] shadow-[0_0_40px_rgba(59,130,246,0.3)] hover:scale-[1.02] active:scale-95 transition-all mb-8 overflow-hidden relative flex-shrink-0"
+            >
+              <div className="absolute inset-0 bg-[url('https://www.transparenttextures.com/patterns/carbon-fibre.png')] opacity-20" />
+              <div className="relative flex flex-col sm:flex-row items-center justify-center gap-4">
+                <Flame className="w-10 h-10 text-white animate-pulse flex-shrink-0" />
+                <div className="text-center sm:text-left flex flex-col">
+                  <div className="text-white font-black text-2xl sm:text-3xl uppercase tracking-tighter leading-tight">Modo Aventura</div>
+                  <div className="text-white/80 text-[10px] sm:text-xs font-bold uppercase tracking-widest leading-none mt-1">Dificultad Progresiva • Puntaje Acumulado</div>
+                </div>
+                <ArrowRight className="hidden sm:block w-8 h-8 text-white/50 group-hover:translate-x-2 transition-transform" />
+              </div>
+            </button>
             <div className="flex gap-4">
               <button onClick={() => { setTutorialStep(0); setGameState('tutorial'); }} className="px-8 py-3 bg-slate-800 rounded-xl font-black text-xs uppercase hover:bg-slate-700 transition-all">Guía</button>
               <button onClick={() => setGameState('leaderboard')} className="px-8 py-3 bg-slate-800 rounded-xl font-black text-xs uppercase hover:bg-slate-700 transition-all">Ranking</button>
             </div>
+            <motion.div 
+              initial={{ y: 20, opacity: 0 }}
+              animate={{ y: 0, opacity: 1 }}
+              transition={{ delay: 0.6 }}
+              className="mt-8 flex flex-col items-center gap-2"
+            >
+              <div className="flex items-center gap-2 px-3 py-1 bg-slate-800/50 rounded-full border border-slate-700/50 backdrop-blur-sm">
+                <div className={`w-2 h-2 rounded-full ${firebaseStatus === 'connected' ? 'bg-green-500 shadow-[0_0_8px_rgba(34,197,94,0.5)]' : firebaseStatus === 'testing' ? 'bg-amber-500 animate-pulse' : 'bg-red-500'}`} />
+                <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">
+                  {firebaseStatus === 'connected' ? 'Nube Conectada' : firebaseStatus === 'testing' ? 'Verificando Nube...' : 'Modo Sin Conexión'}
+                </span>
+              </div>
+            </motion.div>
           </div>
         )}
 
         {gameState === 'flowchart' && (
           <div className="absolute inset-0 flex flex-col items-center justify-center bg-slate-950/95 backdrop-blur-3xl p-6 text-center z-50 animate-in fade-in zoom-in duration-500">
-            <h2 className="text-5xl font-black mb-8 text-blue-400 uppercase tracking-tighter">Misión Matemática</h2>
+            <h2 className="text-5xl font-black mb-8 text-blue-400 uppercase tracking-tighter">
+              {isAdventure ? `AVENTURA: NIVEL ${level}` : 'Misión Matemática'}
+            </h2>
             <div className="p-10 bg-slate-900 border-4 border-blue-500 rounded-[3rem] w-full max-w-md shadow-[0_0_80px_rgba(59,130,246,0.3)] animate-pulse-glow">
               <div className="text-xs font-black text-blue-300 uppercase mb-6 tracking-[0.2em]">OBJETIVO ACTIVO</div>
               <div className="text-4xl font-black mb-2 uppercase leading-none text-white">{gameMode === 'multiples' ? 'Múltiplos' : 'Divisores'}</div>
@@ -854,9 +1065,20 @@ const ZumaMathGame = () => {
               <button 
                 onClick={() => {
                   if (gameState === 'victory') {
-                     initLevel(level + 1, gameMode); 
+                    if (isAdventure) {
+                      const nextLvl = level + 1;
+                      const nextMode = nextLvl % 2 === 0 ? 'divisors' : 'multiples';
+                      setGameMode(nextMode);
+                      initLevel(nextLvl, nextMode, undefined, false); // false = keep score
+                    } else {
+                      initLevel(level + 1, gameMode); 
+                    }
                   } else {
-                     initLevel(1, gameMode, targetNumber); 
+                    if (isAdventure) {
+                      startGame('adventure');
+                    } else {
+                      initLevel(1, gameMode, targetNumber); 
+                    }
                   }
                   setGameState('flowchart'); 
                 }} 
@@ -872,21 +1094,10 @@ const ZumaMathGame = () => {
         {gameState === 'leaderboard' && (
           <div className="absolute inset-0 flex flex-col items-center justify-center bg-slate-950/95 backdrop-blur-3xl p-6 text-center z-50 animate-in fade-in duration-300">
             <button onClick={() => setGameState('menu')} className="absolute top-8 right-8 p-3 bg-white/5 rounded-full hover:bg-white/10 transition-colors"><X className="w-6 h-6"/></button>
-            <div className="w-full max-w-md h-[70vh] flex flex-col">
-              <div className="flex items-center justify-between mb-8">
+            <div className="w-full max-w-md h-[70vh] flex flex-col pt-8">
+              <div className="flex items-center justify-between mb-4">
                 <div>
                   <h2 className="text-4xl font-black uppercase text-amber-500 text-left">Top Pilotos</h2>
-                  <div className="text-[8px] font-bold text-slate-500 uppercase tracking-widest text-left mt-1">
-                    {leaderboard.length > 0 && !loadingScores ? (
-                      <span className="flex items-center gap-1 text-emerald-500/70">
-                        <span className="w-1 h-1 rounded-full bg-emerald-500 animate-pulse" /> Mundial
-                      </span>
-                    ) : (
-                      <span className="flex items-center gap-1">
-                        <span className="w-1 h-1 rounded-full bg-slate-700" /> Sincronizando...
-                      </span>
-                    )}
-                  </div>
                 </div>
                 <button 
                   onClick={refreshLeaderboard} 
@@ -896,6 +1107,36 @@ const ZumaMathGame = () => {
                 >
                   {loadingScores ? <Loader2 className="w-5 h-5 animate-spin"/> : <RefreshCw className="w-5 h-5"/>}
                 </button>
+              </div>
+
+              {/* Leaderboard Tabs */}
+              <div className="flex gap-2 mb-6 bg-slate-900 p-1 rounded-2xl border border-white/5">
+                <button 
+                  onClick={() => setLeaderboardFilter('all')}
+                  className={`flex-1 py-3 rounded-xl font-black text-[10px] uppercase tracking-widest transition-all ${leaderboardFilter === 'all' ? 'bg-blue-600 text-white shadow-lg' : 'text-slate-500 hover:text-white'}`}
+                >
+                  General
+                </button>
+                <button 
+                  onClick={() => setLeaderboardFilter('adventure')}
+                  className={`flex-1 py-3 rounded-xl font-black text-[10px] uppercase tracking-widest transition-all flex items-center justify-center gap-2 ${leaderboardFilter === 'adventure' ? 'bg-amber-600 text-white shadow-lg' : 'text-slate-500 hover:text-white'}`}
+                >
+                  <Flame className={`w-3 h-3 ${leaderboardFilter === 'adventure' ? 'animate-pulse' : ''}`} />
+                  Aventura
+                </button>
+              </div>
+
+              <div className="text-[8px] font-bold text-slate-500 uppercase tracking-widest text-left mb-2 px-2 flex justify-between items-center">
+                {leaderboard.length > 0 && !loadingScores ? (
+                  <span className="flex items-center gap-1 text-emerald-500/70">
+                    <span className="w-1 h-1 rounded-full bg-emerald-500 animate-pulse" /> Sincronizado
+                  </span>
+                ) : (
+                  <span className="flex items-center gap-1">
+                    <Loader2 className="w-2 h-2 animate-spin" /> Actualizando...
+                  </span>
+                )}
+                <span>Top 10 Mundial</span>
               </div>
               <div className="flex-1 overflow-y-auto bg-slate-900/50 border border-white/5 rounded-3xl p-2 scrollbar-hide relative">
                 {loadingScores && leaderboard.length === 0 ? (
@@ -911,10 +1152,23 @@ const ZumaMathGame = () => {
                         <tr key={i} className={`border-b border-white/5 transition-colors hover:bg-white/5 ${r.name === playerName ? 'bg-blue-500/10' : ''}`}>
                           <td className="p-4 font-black text-slate-700">{i+1}</td>
                           <td className="p-4">
-                            <div className="font-bold text-white">{r.name}</div>
-                            <div className="text-[8px] text-slate-500 font-bold uppercase tracking-tighter">{r.mode} • {r.target}</div>
+                            <div className="font-black text-white text-sm uppercase">{r.name}</div>
+                            <div className="text-[10px] text-slate-500 font-bold uppercase tracking-widest flex items-center gap-2">
+                              {r.mode === 'adventure' ? (
+                                <span className="flex items-center gap-1 text-amber-500">
+                                  <Flame className="w-3 h-3" /> Aventura Lvl {r.target}
+                                </span>
+                              ) : (
+                                <>{r.mode === 'multiples' ? 'Múltiplos' : 'Divisores'} de {r.target}</>
+                              )}
+                            </div>
                           </td>
-                          <td className="p-4 font-black text-blue-400 text-right tabular-nums">{r.score.toLocaleString()}</td>
+                          <td className="p-4 font-black text-blue-400 text-right tabular-nums">
+                            <div className="leading-none">{r.score.toLocaleString()}</div>
+                            {r.mode === 'adventure' && (
+                              <div className="text-[9px] text-amber-500/70 mt-1 uppercase">Lvl {r.target}</div>
+                            )}
+                          </td>
                         </tr>
                       ))}
                     </tbody>

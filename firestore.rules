@@ -15,7 +15,7 @@ service cloud.firestore {
         && data.keys().size() == 6
         && data.name is string && data.name.size() >= 1 && data.name.size() <= 20
         && data.score is number && data.score >= 0
-        && data.mode in ['multiples', 'divisors']
+        && data.mode in ['multiples', 'divisors', 'adventure']
         && data.target is number
         && data.date is string && data.date.size() <= 100
         && data.createdAt == request.time;

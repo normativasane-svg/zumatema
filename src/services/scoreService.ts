@@ -1,5 +1,5 @@
 
-import { collection, addDoc, getDocs, query, orderBy, limit, serverTimestamp, Timestamp } from 'firebase/firestore';
+import { collection, addDoc, getDocs, query, orderBy, limit, serverTimestamp, Timestamp, where } from 'firebase/firestore';
 import { getDb } from '../lib/firebase';
 
 export interface ScoreRecord {
@@ -14,12 +14,16 @@ export interface ScoreRecord {
 const COLLECTION_NAME = 'leaderboard';
 
 export const ScoreService = {
+  getDb() {
+    return getDb();
+  },
+
   async saveScore(record: Omit<ScoreRecord, 'createdAt'>): Promise<boolean> {
     try {
       const db = await getDb();
       
-      // Before saving, verify if it qualifies for Top 10
-      const currentTop = await this.getTopScores(10);
+      // Before saving, verify if it qualifies for Top 10 of its mode
+      const currentTop = await this.getTopScores(10, record.mode);
       const isTop10 = currentTop.length < 10 || record.score > (currentTop[currentTop.length - 1]?.score || 0);
 
       if (!db) {
@@ -46,22 +50,32 @@ export const ScoreService = {
     }
   },
 
-  async getTopScores(count: number = 10): Promise<ScoreRecord[]> {
+  async getTopScores(count: number = 10, mode?: string): Promise<ScoreRecord[]> {
     try {
       const db = await getDb();
       if (!db) {
-        return this.getScoresFromLocal(count);
+        return this.getScoresFromLocal(count, mode);
       }
 
-      const q = query(
-        collection(db, COLLECTION_NAME),
-        orderBy('score', 'desc'),
-        limit(count)
-      );
+      let q;
+      if (mode) {
+        q = query(
+          collection(db, COLLECTION_NAME),
+          where('mode', '==', mode),
+          orderBy('score', 'desc'),
+          limit(count)
+        );
+      } else {
+        q = query(
+          collection(db, COLLECTION_NAME),
+          orderBy('score', 'desc'),
+          limit(count)
+        );
+      }
 
       const snapshot = await getDocs(q);
       return snapshot.docs.map(doc => {
-          const data = doc.data();
+          const data = doc.data() as any;
           return {
               ...data,
               createdAt: data.createdAt instanceof Timestamp ? data.createdAt.toDate() : data.createdAt
@@ -69,7 +83,7 @@ export const ScoreService = {
       });
     } catch (error) {
       console.error('Error fetching scores from Firebase, falling back to local:', error);
-      return this.getScoresFromLocal(count);
+      return this.getScoresFromLocal(count, mode);
     }
   },
 
@@ -78,15 +92,18 @@ export const ScoreService = {
     let leaderboard: ScoreRecord[] = saved ? JSON.parse(saved) : [];
     leaderboard.push(record);
     leaderboard.sort((a, b) => b.score - a.score);
-    leaderboard = leaderboard.slice(0, 50); // Keep more locally
+    leaderboard = leaderboard.slice(0, 100); // Keep more locally
     localStorage.setItem('mathZumaLeaderboard', JSON.stringify(leaderboard));
   },
 
-  getScoresFromLocal(count: number = 10): ScoreRecord[] {
+  getScoresFromLocal(count: number = 10, mode?: string): ScoreRecord[] {
     const saved = localStorage.getItem('mathZumaLeaderboard');
     if (!saved) return [];
     try {
-      const records = JSON.parse(saved) as ScoreRecord[];
+      let records = JSON.parse(saved) as ScoreRecord[];
+      if (mode) {
+        records = records.filter(r => r.mode === mode);
+      }
       return records.slice(0, count);
     } catch (e) {
       return [];
